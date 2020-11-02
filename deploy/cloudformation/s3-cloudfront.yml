@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >
+  Creates the AWS infrastructure for hosting a Javascript app in AWS using S3, CloudFront & Route53
+
+Parameters:
+
+  BaseUrl:
+    Type: String
+    Description : The DNS name of an existing Amazon Route 53 hosted zone,
+    AllowedPattern : (?!-)[a-zA-Z0-9-.]{1,63}(?<!-)[^\\.]$
+    ConstraintDescription : Must be a valid DNS zone name WITHOUT trailing period.
+
+  AppUrl:
+    Type: String
+    Description: The subdomain you want to use for your app. Use www for your main domain.
+
+  AcmCertArn:
+    Type: String
+    Description: ARN of the Amazon Certificate Manager cert to use for SSL
+
+  Ac2Code:
+    Type: String
+    Default: 3GAES
+    Description: The Ac2Code associated with the application
+
+Resources:
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-s3-bucket.html
+  AppBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${AppUrl}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+      Tags:
+        -
+          Key: "ac2code"
+          Value: !Ref Ac2Code
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-s3-policy.html
+  AppBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      PolicyDocument:
+        Id: PolicyForCloudFrontPrivateContent
+        Version: 2012-10-17
+        Statement:
+          - Sid: 1
+            Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt OriginAccessIdentity.S3CanonicalUserId
+            Action: 's3:GetObject'
+            Resource: !Join
+              - ''
+              - - 'arn:aws:s3:::'
+                - !Ref AppBucket
+                - /*
+      Bucket: !Ref AppBucket
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-cloudfront-cloudfrontoriginaccessidentity.html
+  OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub access-identity-${AppBucket}.s3.amazonaws.com
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-cloudfront-distribution.html
+  AppDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !Sub ${AppBucket}.s3.amazonaws.com
+          Id: myS3Origin
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${OriginAccessIdentity}
+        Enabled: 'true'
+        Comment: CloudFront distribution for Javascript App
+        CustomErrorResponses:
+        - ErrorCachingMinTTL: 0
+          ErrorCode: 404
+          ResponseCode: 200
+          ResponsePagePath: /index.html
+        - ErrorCachingMinTTL: 0
+          ErrorCode: 403
+          ResponseCode: 200
+          ResponsePagePath: /index.html
+        DefaultRootObject: index.html
+        Aliases:
+        - !Ref AppUrl
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: 'true'
+          TargetOriginId: myS3Origin
+          ForwardedValues:
+            QueryString: 'true'
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertArn
+          SslSupportMethod: sni-only
+
+  # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-route53-recordsetgroup.html
+  WebAppDns:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: !Sub ${BaseUrl}.
+      Comment: IP4 & IP6 alias targeted to CloudFront Distribution.
+      RecordSets:
+      - Name: !Ref AppUrl
+        Type: A
+        AliasTarget:
+          HostedZoneId: Z2FDTNDATAQYW2
+          DNSName: !GetAtt
+            - AppDistribution
+            - DomainName
+      - Name: !Ref AppUrl
+        Type: AAAA
+        AliasTarget:
+          HostedZoneId: Z2FDTNDATAQYW2
+          DNSName: !GetAtt
+            - AppDistribution
+            - DomainName
+
+Outputs:
+  AppBucket:
+    Description: S3 Bucket hosting the javascript application
+    Value: !Ref AppBucket
+  DistributionId:
+    Value: !Ref AppDistribution
+    Description: CloudFront DistributionId
+  CloudFrontURL:
+    Value: !Join
+      - ''
+      - - 'https://'
+        - !GetAtt
+          - AppDistribution
+          - DomainName
+    Description: URL for website CDN
